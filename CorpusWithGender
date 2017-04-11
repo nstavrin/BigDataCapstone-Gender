@@ -1,0 +1,417 @@
+library(tidyr)
+library(dplyr)
+library("RPostgreSQL")
+library(tm)
+library(wordcloud)
+library(rpart)
+library(rpart.plot)
+
+#Connect to Mimic Database
+
+drv <- dbDriver("PostgreSQL")
+con<-dbConnect(drv,dbname="mimic", host="localhost", port=5432, user="mimic")
+
+#Check connection
+
+dbListTables(con)
+dbExistsTable(con, c("mimiciii","noteevents"))
+dbListFields(con,c("mimiciii","patients"))
+dbGetQuery(con,"Select count(subject_id) from mimiciii.patients")
+
+#Table of gender and status
+
+PatientTable<-dbReadTable(con,c("mimiciii","patients"))
+table(PatientTable$gender, PatientTable$expire_flag)
+
+#Deceased patients
+PatientIDDeceased<-dbGetQuery(con,"Select subject_id from mimiciii.patients where dod is not null")
+length(PatientIDDeceased[[1]])
+PatientIDDeceased["Status"]<-0
+
+#Alive patients
+PatientIDAlive<-dbGetQuery(con,"Select subject_id from mimiciii.patients where dod is null")
+length(PatientIDAlive[[1]])
+PatientIDAlive["Status"]<-1
+
+#Combined Status
+PatientStatus<-rbind(PatientIDAlive,PatientIDDeceased)
+
+#Female patients
+PatientFemale<-dbGetQuery(con,"Select subject_id from mimiciii.patients where gender='F'")
+PatientFemale["gender"]<-0
+
+#Male patients
+PatientMale<-dbGetQuery(con,"Select subject_id from mimiciii.patients where gender='M'")
+PatientMale["gender"]<-1
+
+#Combined Gender
+PatientGender<-rbind(PatientMale,PatientFemale)
+
+#Information about noteevents table
+
+dbListFields(con,c("mimiciii","noteevents"))
+dbGetQuery(con,"select distinct category from mimiciii.noteevents")
+dbGetQuery(con,"select category, count(category) from mimiciii.noteevents group by category")
+
+#Reading noteevents by type – Nursing notes
+
+NoteeventNursingDF<-dbGetQuery(con,"select * from mimiciii.noteevents where category ='Nursing'")
+
+#Combine Nursing Notes and Status
+
+PatientStatus<-rbind(PatientIDAlive,PatientIDDeceased)
+
+#Create Combined Nurse Notes table with Status and gender
+
+NurseStatus<-left_join(NoteeventNursingDF, PatientStatus, by="subject_id")
+NurseStatus<-left_join(NurseStatus, PatientGender, by="subject_id")
+
+#Filter by status and gender
+NurseMA<-filter(NurseStatus, NurseStatus$gender==1 & NurseStatus$Status==1)
+NurseFA<-filter(NurseStatus, NurseStatus$gender==0 & NurseStatus$Status==1)
+NurseMD<-filter(NurseStatus, NurseStatus$gender==1 & NurseStatus$Status==0)
+NurseFD<-filter(NurseStatus, NurseStatus$gender==0 & NurseStatus$Status==0)
+
+#Sample for corpus (10%) from each case
+NurseMAS<-sample(nrow(NurseMA),nrow(NurseMA)*0.1)
+NurseFAS<-sample(nrow(NurseFA),nrow(NurseFA)*0.1)
+NurseMDS<-sample(nrow(NurseMD),nrow(NurseMD)*0.1)
+NurseFDS<-sample(nrow(NurseFD),nrow(NurseFD)*0.1)
+
+#Select Patients by Status and gender
+
+RandomPatients<-c(NurseMAS, NurseFAS, NurseMDS, NurseFDS)
+NurseNotesRP<-NurseStatus[RandomPatients,]
+
+NurseNotesMA<- NurseStatus[NurseMAS,]
+NurseNotesFA<- NurseStatus[NurseFAS,]
+NurseNotesMD<- NurseStatus[NurseMDS,]
+NurseNotesFD<- NurseStatus[NurseFDS,]
+
+AlivePatients<-c(NurseMAS, NurseFAS)
+DecPatients<-c(NurseMDS, NurseFDS)
+
+NurseNotesAlive<-NurseStatus[AlivePatients,]
+NurseNotesDec<-NurseStatus[DecPatients,]
+
+#Corpus Male Alive Patient
+
+NurseNotesMAC<- VCorpus(DataframeSource(NurseNotesMA))
+
+#Corpus Males Deceased Patients
+
+NurseNotesMDC<- VCorpus(DataframeSource(NurseNotesMD))
+
+#Corpus Female Alive Patient
+
+NurseNotesFAC<- VCorpus(DataframeSource(NurseNotesFA))
+
+#Corpus Female Deceased Patient
+NurseNotesFDC<- VCorpus(DataframeSource(NurseNotesFD))
+
+#Corpus Alive Patient
+nurse_corpus_alive<-VCorpus(DataframeSource(NurseNotesAlive))
+
+#Corpus Dec Patient
+nurse_corpus_dec<-VCorpus(DataframeSource(NurseNotesDec))
+
+#Corpus All Alive and Deceased from random sampel Patients
+
+nurse_corpus<-VCorpus(DataframeSource(NurseNotesRP))
+
+#Clean Corpus – Alive Patients
+
+NurseNotesMAC <-tm_map(NurseNotesMAC, content_transformer(tolower))
+NurseNotesMAC <-tm_map(NurseNotesMAC, stripWhitespace)
+NurseNotesMAC <-tm_map(NurseNotesMAC, removeWords, stopwords("english"))
+NurseNotesMAC <-tm_map(NurseNotesMAC, removePunctuation)
+toSpace<-content_transformer(function(x, pattern) gsub(pattern," ",x))
+NurseNotesMAC <-tm_map(NurseNotesMAC,toSpace,c("\n","but","and"))
+NurseNotesMAC <-tm_map(NurseNotesMAC,toSpace,c("his","her","this"))
+NurseNotesMAC <-tm_map(NurseNotesMAC, stripWhitespace)
+
+NurseNotesFAC <-tm_map(NurseNotesFAC, content_transformer(tolower))
+
+NurseNotesFAC <-tm_map(NurseNotesFAC, removeWords, stopwords("english"))
+NurseNotesMAC <-tm_map(NurseNotesFAC, removePunctuation)
+
+toSpace<-content_transformer(function(x, pattern) gsub(pattern," ",x))
+NurseNotesFAC <-tm_map(NurseNotesFAC,toSpace,c("\n","but","and"))
+NurseNotesFAC <-tm_map(NurseNotesFAC,toSpace,c("his","her","this"))
+NurseNotesFAC <-tm_map(NurseNotesFAC, stripWhitespace)
+
+nurse_corpus_alive<-tm_map(nurse_corpus_alive, content_transformer(tolower))
+nurse_corpus_alive<-tm_map(nurse_corpus_alive, removeWords, stopwords("english"))
+nurse_corpus_alive<-tm_map(nurse_corpus_alive, removePunctuation)
+
+toSpace<-content_transformer(function(x, pattern) gsub(pattern," ",x))
+nurse_corpus_alive<-tm_map(nurse_corpus_alive, toSpace, c("his","her","this"))
+nurse_corpus_alive<-tm_map(nurse_corpus_alive, toSpace, c("\n","but","and"))
+
+#Clean Corpus – Deceased Patients
+
+NurseNotesMDC <-tm_map(NurseNotesMDC, content_transformer(tolower))
+NurseNotesMDC <-tm_map(NurseNotesMDC, removeWords, stopwords("english"))
+NurseNotesMDC <-tm_map(NurseNotesMDC, removePunctuation)
+
+toSpace<-content_transformer(function(x, pattern) gsub(pattern," ",x))
+NurseNotesMDC <-tm_map(NurseNotesMDC,toSpace,c("\n","but","and"))
+NurseNotesMDC <-tm_map(NurseNotesMDC,toSpace,c("his","her","this"))
+NurseNotesMDC <-tm_map(NurseNotesMDC, stripWhitespace)
+
+NurseNotesFDC <-tm_map(NurseNotesFDC, content_transformer(tolower))
+NurseNotesFDC <-tm_map(NurseNotesFDC, removeWords, stopwords("english"))
+NurseNotesFDC <-tm_map(NurseNotesFDC, removePunctuation)
+
+toSpace<-content_transformer(function(x, pattern) gsub(pattern," ",x))
+NurseNotesFDC <-tm_map(NurseNotesFDC,toSpace,c("\n","but","and"))
+NurseNotesFDC <-tm_map(NurseNotesFDC,toSpace,c("his","her","this"))
+NurseNotesFDC <-tm_map(NurseNotesFDC, stripWhitespace)
+
+nurse_corpus_dec<-tm_map(nurse_corpus_dec, content_transformer(tolower))
+nurse_corpus_dec<-tm_map(nurse_corpus_dec, removeWords, stopwords("english"))
+nurse_corpus_dec<-tm_map(nurse_corpus_dec, removePunctuation)
+
+toSpace<-content_transformer(function(x, pattern) gsub(pattern," ",x))
+nurse_corpus_dec<-tm_map(nurse_corpus_dec, toSpace, c("\n","but","and"))
+nurse_corpus_dec<-tm_map(nurse_corpus_dec, toSpace, c("his","her","this"))	
+nurse_corpus_dec<-tm_map(nurse_corpus_dec, stripWhitespace)
+
+#Clean Corpus -  All
+
+nurse_corpus<-tm_map(nurse_corpus, content_transformer(tolower))
+
+nurse_corpus<-tm_map(nurse_corpus, removeWords, stopwords("english"))
+nurse_corpus<-tm_map(nurse_corpus, removePunctuation)
+
+nurse_corpus<-tm_map(nurse_corpus, removeNumbers)
+
+toSpace<-content_transformer(function(x, pattern) gsub(pattern," ",x))
+nurse_corpus<-tm_map(nurse_corpus, toSpace, c("\n","but","and"))
+nurse_corpus<-tm_map(nurse_corpus, toSpace, c("his","her","this"))	
+nurse_corpus<-tm_map(nurse_corpus, stripWhitespace)
+
+#Document Term Matrix-Male Alive Patient
+NurseNotesMAC_dtm<-DocumentTermMatrix(NurseNotesMAC)
+NurseNotesMAC_dtm
+NurseNotesMAC_dtm_s<-removeSparseTerms(NurseNotesMAC_dtm, 0.99)
+
+#Word Cloud -Male Alive Patient
+
+freqMA<-data.frame(sort(colSums(as.matrix(NurseNotesMAC_dtm_s)),decreasing=TRUE))
+wordcloud(rownames(freqMA),freqMA[,1],max.words=50,random.order=FALSE, colors=brewer.pal(8,"Dark2"))
+
+#Document Term Matrix-Male Alive Patient - TFIDF
+NurseNotesMAC_tfidf<-DocumentTermMatrix(NurseNotesMAC, control=list(weighting=weightTfIdf))
+NurseNotesMAC_tfidf_s<-removeSparseTerms(NurseNotesMAC_tfidf,0.95)
+
+#Word Cloud -Male Alive Patient - TFIDF
+freqMAT<-data.frame(sort(colSums(as.matrix(NurseNotesMAC_tfidf_s)),decreasing=TRUE))
+wordcloud(rownames(freqMAT),freqMAT[,1],max.words=50,colors=brewer.pal(8,"Dark2"))
+MACWords<-rownames(freqMAT)
+
+#Document Term Matrix-Male Deceased Patient
+NurseNotesMDC_dtm<-DocumentTermMatrix(NurseNotesMDC)
+NurseNotesMDC_dtm
+NurseNotesMDC_dtm_s<-removeSparseTerms(NurseNotesMDC_dtm, 0.99)
+
+#Word Cloud -Male Deceased Patient
+freqMD<-data.frame(sort(colSums(as.matrix(NurseNotesMDC_dtm_s)),decreasing=TRUE))
+wordcloud(rownames(freqMD),freqMD[,1],max.words=50,random.order=FALSE, colors=brewer.pal(8,"Dark2"))
+
+#Document Term Matrix-Male Deceased Patient - TFIDF
+NurseNotesMDC_tfidf<-DocumentTermMatrix(NurseNotesMDC, control=list(weighting=weightTfIdf))
+NurseNotesMDC_tfidf_s<-removeSparseTerms(NurseNotesMDC_tfidf,0.95)
+
+#Word Cloud -Male Deceased Patient - TFIDF
+freqMDT<-data.frame(sort(colSums(as.matrix(NurseNotesMDC_tfidf_s)),decreasing=TRUE))
+wordcloud(rownames(freqMDT),freqMDT[,1],max.words=50,colors=brewer.pal(8,"Dark2"))
+MDCWords<-rownames(freqMDT)
+
+#Document Term Matrix-Female Alive Patient
+NurseNotesFAC_dtm<-DocumentTermMatrix(NurseNotesFAC)
+NurseNotesFAC_dtm
+NurseNotesFAC_dtm_s<-removeSparseTerms(NurseNotesFAC_dtm, 0.99)
+
+#Word Cloud -Female Alive Patient
+
+freqFA<-data.frame(sort(colSums(as.matrix(NurseNotesFAC_dtm_s)),decreasing=TRUE))
+wordcloud(rownames(freqFA),freqFA[,1],max.words=50,random.order=FALSE, colors=brewer.pal(8,"Dark2"))
+
+#Document Term Matrix-Female Alive Patient - TFIDF
+NurseNotesFAC_tfidf<-DocumentTermMatrix(NurseNotesFAC, control=list(weighting=weightTfIdf))
+NurseNotesFAC_tfidf_s<-removeSparseTerms(NurseNotesFAC_tfidf,0.95)
+
+#Word Cloud -Female Alive Patient - TFIDF
+freqFAT<-data.frame(sort(colSums(as.matrix(NurseNotesFAC_tfidf_s)),decreasing=TRUE))
+wordcloud(rownames(freqFAT),freqFAT[,1],max.words=50,colors=brewer.pal(8,"Dark2"))
+FACWords<-rownames(freqFAT)
+
+#Document Term Matrix-Female Deceased Patient
+NurseNotesFDC_dtm<-DocumentTermMatrix(NurseNotesFDC)
+NurseNotesFDC_dtm
+NurseNotesFDC_dtm_s<-removeSparseTerms(NurseNotesFDC_dtm, 0.99)
+
+#Word Cloud -Female Deceased Patient
+freqFD<-data.frame(sort(colSums(as.matrix(NurseNotesFDC_dtm_s)),decreasing=TRUE))
+wordcloud(rownames(freqFD),freqFD[,1],max.words=50, random.order=FALSE, colors=brewer.pal(8,"Dark2"))
+
+#Document Term Matrix-Female Deceased Patient - TFIDF
+NurseNotesFDC_tfidf<-DocumentTermMatrix(NurseNotesFDC, control=list(weighting=weightTfIdf))
+NurseNotesFDC_tfidf_s<-removeSparseTerms(NurseNotesFDC_tfidf,0.95)
+
+#Word Cloud -Female Deceased Patient - TFIDF
+freqFDT<-data.frame(sort(colSums(as.matrix(NurseNotesFDC_tfidf_s)),decreasing=TRUE))
+wordcloud(rownames(freqFDT),freqFDT[,1],max.words=50,colors=brewer.pal(8,"Dark2"))
+FDCWords<-rownames(freqFDT)
+
+#Document Term Matrix-Alive Patient
+
+nurse_alive_dtm<-DocumentTermMatrix(nurse_corpus_alive)
+nurse_alive_dtm
+nurse_alive_dtm_s<-removeSparseTerms(nurse_alive_dtm, 0.99)
+nurse_alive_dtm_s
+
+#Word Cloud -Alive Patient
+
+freqA<-data.frame(sort(colSums(as.matrix(nurse_alive_dtm_s)),decreasing=TRUE))
+wordcloud(rownames(freqA),freqA[,1],max.words=50,random.order=FALSE, colors=brewer.pal(8,"Dark2"))
+
+#Document Term Matrix-Alive Patient - TFIDF
+
+nurse_dtm_alive_tfidf<-DocumentTermMatrix(nurse_corpus_alive, control=list(weighting=weightTfIdf))
+nurse_dtm_alive_tfidf
+nurse_dtm_alive_tfidf_s<-removeSparseTerms(nurse_dtm_alive_tfidf,0.99)
+nurse_dtm_alive_tfidf_s
+
+#Word Cloud -Alive Patient - TFIDF
+
+freqAT<-data.frame(sort(colSums(as.matrix(nurse_dtm_alive_tfidf_s)),decreasing=TRUE))
+wordcloud(rownames(freqAT),freqAT[,1],max.words=50,random.order=FALSE, colors=brewer.pal(8,"Dark2"))
+
+
+#Alive Words
+
+AliveWords<-rownames(freqAT)
+
+#DocumentTerm Matrix-Deceased Patients
+
+nurse_dec_dtm<-DocumentTermMatrix(nurse_corpus_dec)
+nurse_dec_dtm
+nurse_dec_dtm_s<-removeSparseTerms(nurse_dec_dtm, 0.99)
+nurse_dec_dtm_s
+
+#Word Cloud-Deceased Patients
+
+freqD<-data.frame(sort(colSums(as.matrix(nurse_dec_dtm_s)),decreasing=TRUE))
+wordcloud(rownames(freqD),freqD[,1],max.words=50, random.order=FALSE, colors=brewer.pal(8,"Dark2"))
+
+#Document Term Matrix-Deceased Patient - TFIDF
+
+nurse_dtm_dec_tfidf<-DocumentTermMatrix(nurse_corpus_dec, control=list(weighting=weightTfIdf))
+nurse_dtm_dec_tfidf
+nurse_dtm_dec_tfidf_s<-removeSparseTerms(nurse_dtm_dec_tfidf,0.99)
+nurse_dtm_alive_tfidf_s
+
+#Word Cloud -Deceased Patient - TFIDF
+
+freqDT<-data.frame(sort(colSums(as.matrix(nurse_dtm_dec_tfidf_s)),decreasing=TRUE))
+wordcloud(rownames(freqDT),freqDT[,1],max.words=50,random.order=FALSE, colors=brewer.pal(8,"Dark2"))
+
+#Deceased Words 
+
+DecWords<-rownames(freqDT)
+
+#Document Term Matrix-All Random Sample Alive and Deceased Patients
+
+nurse_bin_dtm<-DocumentTermMatrix(nurse_corpus)
+
+#Document Term Matrix-All Random Sample Alive and Deceased Patients - TFIDF
+
+nurse_dtm_bin_tfidf<-DocumentTermMatrix(nurse_corpus, control=list(weighting=weightTfIdf))
+nurse_dtm_bin_tfidf_s<-removeSparseTerms(nurse_dtm_bin_tfidf,0.99)
+
+#Combing and counting words and corpus for all patients (10% from Alive and 10% from Deceased ‘subset)
+
+NurseNotesRP$MAD<-sapply(nurse_corpus, tm_term_score, MACWords)
+NurseNotesRP$MDD<-sapply(nurse_corpus, tm_term_score, MDCWords)
+NurseNotesRP$FAD<-sapply(nurse_corpus, tm_term_score, FACWords)
+NurseNotesRP$FDD<-sapply(nurse_corpus, tm_term_score, FDCWords)
+NurseNotesRP$AD<-sapply(nurse_corpus, tm_term_score, AliveWords)
+NurseNotesRP$DD<-sapply(nurse_corpus, tm_term_score, DecWords)
+
+#Combing and counting words and corpus Gender and Status
+NurseNotesRPBinGS = cbind(NurseNotesRP,as.matrix(nurse_dtm_bin_tfidf_s))
+NurseNotesRPBinGS$Status<-as.factor(NurseNotesRPBinGS$Status)
+
+#Training and Test Set Gender and Status
+
+train<-sample(nrow(NurseNotesRP),nrow(NurseNotesRP)*0.8)
+
+NurseNotes_train<-NurseNotesRPBinGS[train,]
+NurseNotes_test<-NurseNotesRPBinGS[-train,]
+
+NurseNotes_train$text<-NULL
+NurseNotes_train$subject_id<-NULL
+NurseNotes_train$hadm_id<-NULL
+NurseNotes_train$chartdate<-NULL
+NurseNotes_train$charttime<-NULL
+NurseNotes_train$storetime<-NULL
+NurseNotes_train$cgid<-NULL
+NurseNotes_train$iserror<-NULL
+NurseNotes_train$category<-NULL
+NurseNotes_train$description<-NULL
+NurseNotes_train$row_id<-NULL
+
+NurseNotes_test$text<-NULL
+NurseNotes_test$subject_id<-NULL
+NurseNotes_test$hadm_id<-NULL
+NurseNotes_test$chartdate<-NULL
+NurseNotes_test$charttime<-NULL
+NurseNotes_test$storetime<-NULL
+NurseNotes_test$cgid<-NULL
+NurseNotes_test$iserror<-NULL
+NurseNotes_test$category<-NULL
+NurseNotes_test$description<-NULL
+NurseNotes_test$row_id<-NULL
+
+#Decision Tree with Gender and Status with word counts
+
+NurseNoteDTall<-rpart(Status~.,method="class", cp=0.005, data=NurseNotes_train)
+prp(NurseNoteDTall)
+
+#Confusion Matrix with Gender and Status with word counts
+
+predictionTree_All<-predict(NurseNoteDTall, NurseNotes_test, type="class")
+table(NurseNotes_test$Status, predictionTree_All)
+
+#Word Frequencies
+freqMAC<-sort(colSums(as.matrix(NurseNotesMAC_dtm_s)),decreasing=TRUE)
+freqMDC<-sort(colSums(as.matrix(NurseNotesMDC_dtm_s)),decreasing=TRUE)
+freqFAC<-sort(colSums(as.matrix(NurseNotesFAC_dtm_s)),decreasing=TRUE)
+freqFDC<-sort(colSums(as.matrix(NurseNotesFDC_dtm_s)),decreasing=TRUE)
+freqDW<-sort(colSums(as.matrix(nurse_dec_dtm_s)),decreasing=TRUE)
+freqAW<-sort(colSums(as.matrix(nurse_alive_dtm_s)),decreasing=TRUE)
+freqAWt<-sort(colSums(as.matrix(nurse_dtm_alive_tfidf_s)),decreasing=TRUE)
+freqDWt<-sort(colSums(as.matrix(nurse_dtm_dec_tfidf_s)),decreasing=TRUE)
+
+
+
+
+freqMACt<-sort(colSums(as.matrix(NurseNotesMAC_tfidf_s)),decreasing=TRUE)
+freqMDCt<-sort(colSums(as.matrix(NurseNotesMDC_tfidf_s)),decreasing=TRUE)
+freqFACt<-sort(colSums(as.matrix(NurseNotesFAC_tfidf_s)),decreasing=TRUE)
+freqFDCt<-sort(colSums(as.matrix(NurseNotesFDC_tfidf_s)),decreasing=TRUE)
+
+head(freqMAC)
+head(freqFAC)
+head(freqAW)
+head(freqMDC)
+head(freqFDC)
+head(freqDW)
+head(freqMACt)
+head(freqFACt)
+head(freqAWt)
+head(freqMDCt)
+head(freqFDCt)
+head(freqDWt)
